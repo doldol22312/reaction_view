@@ -14,6 +14,7 @@ import { ModalCloseButton, ModalContent, ModalFooter, ModalHeader, ModalProps, M
 const DAY = 86_400_000;
 const DEFAULT_DAYS = 7;
 const CANCELLED_SCAN = "Reaction scan cancelled";
+const MODAL_EXITING_STATE = 2;
 
 const settings = definePluginSettings({
     maxPages: {
@@ -295,10 +296,18 @@ function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalPro
     const [error, setError] = useState<string | null>(null);
     const [truncated, setTruncated] = useState(false);
     const tokenRef = useRef<CancelToken | null>(null);
+    const didAutoScanRef = useRef(false);
 
     const maxResults = getMaxResults();
     const maxPages = getMaxPages();
     const channelLabel = getChannelLabel(channel);
+    const isClosing = modalProps.transitionState >= MODAL_EXITING_STATE;
+
+    function cancelScan() {
+        if (tokenRef.current) {
+            tokenRef.current.cancelled = true;
+        }
+    }
 
     async function startScan(days: number) {
         const safeDays = clampNumber(days, DEFAULT_DAYS, 1, 365);
@@ -348,20 +357,28 @@ function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalPro
     }
 
     useEffect(() => {
+        didAutoScanRef.current = false;
+    }, [channel.id]);
+
+    useEffect(() => {
+        if (isClosing || didAutoScanRef.current) return;
+
+        didAutoScanRef.current = true;
         void startScan(DEFAULT_DAYS);
 
         return () => {
-            if (tokenRef.current) {
-                tokenRef.current.cancelled = true;
-            }
+            cancelScan();
         };
-    }, [channel.id]);
+    }, [channel.id, isClosing]);
 
     return (
         <ModalRoot {...modalProps} size={ModalSize.LARGE}>
             <ModalHeader>
                 <Text variant="heading-lg/semibold" style={{ flexGrow: 1 }}>Top Reacted Messages</Text>
-                <ModalCloseButton onClick={modalProps.onClose} />
+                <ModalCloseButton onClick={() => {
+                    cancelScan();
+                    modalProps.onClose();
+                }} />
             </ModalHeader>
 
             <ModalContent>
@@ -443,6 +460,7 @@ function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalPro
                                             </Button>
                                             <Button
                                                 onClick={() => {
+                                                    cancelScan();
                                                     modalProps.onClose();
                                                     jumpToMessage(channel.id, message.id);
                                                 }}
@@ -468,7 +486,10 @@ function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalPro
 
             <ModalFooter>
                 <Button onClick={() => void startScan(activeDays)} disabled={loading}>Refresh</Button>
-                <Button onClick={modalProps.onClose}>Close</Button>
+                <Button onClick={() => {
+                    cancelScan();
+                    modalProps.onClose();
+                }}>Close</Button>
             </ModalFooter>
         </ModalRoot>
     );
