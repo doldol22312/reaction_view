@@ -91,6 +91,14 @@ interface CancelToken {
     cancelled: boolean;
 }
 
+interface CachedModalState {
+    activeDays: number;
+    customDays: string;
+    results: RankedMessage[];
+    progress: ScanProgress;
+    truncated: boolean;
+}
+
 const resultCardStyle = {
     border: "1px solid var(--border-subtle)",
     borderRadius: 8,
@@ -104,6 +112,8 @@ const controlRowStyle = {
     flexWrap: "wrap",
     alignItems: "center"
 } as const;
+
+const modalStateCache = new Map<string, CachedModalState>();
 
 function clampNumber(value: number, fallback: number, min: number, max: number) {
     if (!Number.isFinite(value)) return fallback;
@@ -120,6 +130,24 @@ function getMaxResults() {
 
 function getRequestDelay() {
     return clampNumber(settings.store.requestDelayMs, 250, 0, 2_000);
+}
+
+function getInitialModalState(channelId: string): CachedModalState {
+    return modalStateCache.get(channelId) ?? {
+        activeDays: DEFAULT_DAYS,
+        customDays: "14",
+        results: [],
+        progress: { pages: 0, scanned: 0, matches: 0 },
+        truncated: false
+    };
+}
+
+function setCachedModalState(channelId: string, state: CachedModalState) {
+    modalStateCache.set(channelId, {
+        ...state,
+        results: [...state.results],
+        progress: { ...state.progress }
+    });
 }
 
 function getChannelLabel(channel: Channel) {
@@ -288,15 +316,16 @@ async function scanChannelByReactions(
 }
 
 function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalProps: ModalProps; }) {
-    const [customDays, setCustomDays] = useState("14");
-    const [activeDays, setActiveDays] = useState(DEFAULT_DAYS);
-    const [results, setResults] = useState<RankedMessage[]>([]);
-    const [progress, setProgress] = useState<ScanProgress>({ pages: 0, scanned: 0, matches: 0 });
+    const initialState = getInitialModalState(channel.id);
+    const [customDays, setCustomDays] = useState(initialState.customDays);
+    const [activeDays, setActiveDays] = useState(initialState.activeDays);
+    const [results, setResults] = useState<RankedMessage[]>(initialState.results);
+    const [progress, setProgress] = useState<ScanProgress>(initialState.progress);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [truncated, setTruncated] = useState(false);
+    const [truncated, setTruncated] = useState(initialState.truncated);
     const tokenRef = useRef<CancelToken | null>(null);
-    const didAutoScanRef = useRef(false);
+    const didAutoScanRef = useRef(initialState.results.length > 0 || initialState.progress.pages > 0);
 
     const maxResults = getMaxResults();
     const maxPages = getMaxPages();
@@ -313,6 +342,7 @@ function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalPro
         const safeDays = clampNumber(days, DEFAULT_DAYS, 1, 365);
         const minTimestamp = Date.now() - safeDays * DAY;
         const token = { cancelled: false };
+        let latestProgress: ScanProgress = { pages: 0, scanned: 0, matches: 0 };
 
         if (tokenRef.current) {
             tokenRef.current.cancelled = true;
@@ -327,11 +357,23 @@ function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalPro
         setProgress({ pages: 0, scanned: 0, matches: 0 });
 
         try {
-            const scan = await scanChannelByReactions(channel.id, minTimestamp, token, setProgress);
+            const scan = await scanChannelByReactions(channel.id, minTimestamp, token, nextProgress => {
+                latestProgress = nextProgress;
+                setProgress(nextProgress);
+            });
             if (token.cancelled) return;
 
-            setResults(scan.results.slice(0, maxResults));
+            const nextResults = scan.results.slice(0, maxResults);
+
+            setResults(nextResults);
             setTruncated(scan.truncated);
+            setCachedModalState(channel.id, {
+                activeDays: safeDays,
+                customDays,
+                results: nextResults,
+                progress: latestProgress,
+                truncated: scan.truncated
+            });
         } catch (error) {
             if (token.cancelled) return;
 
@@ -357,7 +399,16 @@ function ReactionViewModal({ channel, modalProps }: { channel: Channel; modalPro
     }
 
     useEffect(() => {
-        didAutoScanRef.current = false;
+        const cachedState = getInitialModalState(channel.id);
+
+        setCustomDays(cachedState.customDays);
+        setActiveDays(cachedState.activeDays);
+        setResults(cachedState.results);
+        setProgress(cachedState.progress);
+        setTruncated(cachedState.truncated);
+        setLoading(false);
+        setError(null);
+        didAutoScanRef.current = cachedState.results.length > 0 || cachedState.progress.pages > 0;
     }, [channel.id]);
 
     useEffect(() => {
